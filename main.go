@@ -1,168 +1,183 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"strings"
-	"time"
-
-	"github.com/xuri/excelize/v2"
 )
 
-// Struct to parse the API response
-type LogEntry struct {
-	UserID       string `json:"user_id"`
-	CreatedAt    string `json:"createdAt"`
-	RequestBody  string `json:"requestBody"`
-	ResponseBody string `json:"responseBody"`
-	Service      string `json:"service"`
+// Configuration for API
+const (
+	UATURL              = "https://apiuat.iifl.in/PayinGateway/Partner/DREMakerV3"
+	SubscriptionKey     = "06573965fb254f63bcc4a310b43650fe"
+	AppName             = "DREPartner"
+	AppVersion          = "1.0"
+	EncryptionKey       = "E7D6A56889FEED8F" // Replace with the actual key
+	EncryptionKeyLength = 32                 // 256-bit AES key
+	EncryptionBlockSize = 16                 // AES block size
+)
+
+// RequestHeader defines the structure of the request header
+type RequestHeader struct {
+	AppName    string `json:"appName"`
+	AppVersion string `json:"appVersion"`
 }
 
-type APIResponse struct {
-	Data struct {
-		Logs []LogEntry `json:"logs"`
-	} `json:"data"`
+// RequestBody defines the structure of the request body
+type RequestBody struct {
+	Data string `json:"data"`
 }
 
-// Read user IDs from an Excel (.xlsx) file
-func readUserIDsFromXLSX(filePath string) ([]string, error) {
-	f, err := excelize.OpenFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("error opening Excel file: %v", err)
+// APIRequest combines the header and body
+type APIRequest struct {
+	Head RequestHeader `json:"head"`
+	Body RequestBody   `json:"body"`
+}
+
+// PlainRequest represents the unencrypted request payload
+type PlainRequest struct {
+	Location            string  `json:"Location"`
+	ProspectNo          string  `json:"ProspectNo"`
+	ProductCode         string  `json:"ProductCode"`
+	AdvancedEMI         float64 `json:"AdvancedEMI"`
+	EMIOTC              float64 `json:"EMI_OTC"`
+	BounceChequeCharges float64 `json:"BounceChequeCharges"`
+	PenalCharges        float64 `json:"PenalCharges"`
+	ProcessingFeeIMD    float64 `json:"ProcessingFee_IMD"`
+	PreEMI              float64 `json:"PreEMI"`
+	SwapCharges         float64 `json:"SwapCharges"`
+	ForeClosure         float64 `json:"ForeClosure"`
+	OtherCharges        float64 `json:"OtherCharges"`
+	TotalAmount         float64 `json:"TotalAmount"`
+	PaymentMode         string  `json:"PaymentMode"`
+	BankName            string  `json:"BankName"`
+	ChequeNo            string  `json:"ChequeNo"`
+	Remarks             string  `json:"Remarks"`
+	Reason              string  `json:"Reason"`
+	Source              string  `json:"Source"`
+	Status              string  `json:"Status"`
+}
+
+// EncryptAES256 encrypts data using AES-256 CBC mode
+func EncryptAES256(data, key string) (string, error) {
+	if len(key) != EncryptionKeyLength {
+		return "", fmt.Errorf("invalid encryption key length")
 	}
-	defer f.Close()
 
-	var userIDs []string
+	// Convert the key and plaintext to byte slices
+	keyBytes := []byte(key)
+	plaintext := []byte(data)
 
-	// Assuming the user IDs are in the first column (A) of the first sheet
-	rows, err := f.GetRows(f.GetSheetName(0)) // Get the first sheet by index (0)
+	// Pad plaintext to be a multiple of AES block size
+	padding := EncryptionBlockSize - (len(plaintext) % EncryptionBlockSize)
+	paddedPlaintext := append(plaintext, bytes.Repeat([]byte{0}, padding)...)
+
+	// Create AES cipher
+	block, err := aes.NewCipher(keyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("error reading rows: %v", err)
+		return "", err
 	}
 
-	for _, row := range rows {
-		if len(row) > 0 {
-			userIDs = append(userIDs, strings.TrimSpace(row[0])) // Read the first column (user_id)
+	// Generate an initialization vector (IV)
+	iv := make([]byte, block.BlockSize()) // Set to zeros (can be random for better security)
+
+	// Perform encryption
+	ciphertext := make([]byte, len(paddedPlaintext))
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext, paddedPlaintext)
+
+	// Encode to Base64
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// CallAPI sends the request to the API and returns the response
+func CallAPI(encryptedData string) (*http.Response, error) {
+	// Create the request payload
+	payload := APIRequest{
+		Head: RequestHeader{
+			AppName:    AppName,
+			AppVersion: AppVersion,
+		},
+		Body: RequestBody{
+			Data: encryptedData,
+		},
+	}
+
+	// Marshal payload to JSON
+	requestBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request payload: %v", err)
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", UATURL, bytes.NewBuffer(requestBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %v", err)
+	}
+
+	// Add headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Ocp-Apim-Subscription-Key", SubscriptionKey)
+
+	// Perform the HTTP request
+	client := &http.Client{}
+	return client.Do(req)
+}
+
+func main() {
+	// Define the API URL
+	apiURL := "https://apiuat.iifl.in/PayinGateway/Partner/DREMakerV3"
+
+	// Define the headers
+	headers := map[string]string{
+		"Ocp-Apim-Subscription-Key": "06573965fb254f63bcc4a310b43650fe",
+		"ClientId":                  "Paytm",
+		"AppName":                   "DREPartner",
+		"Content-Type":              "application/json",
+	}
+
+	// Define the request payload
+	requestBody := `{
+		"head": {
+			"appName": "DREPartner",
+			"appVersion": "1.0"
+		},
+		"body": {
+			"data": "/khw6WiOrS0av6YU1wrtogfnq608dP8ZHOeM95vbi9bgT9OWKfY57b9RbwAIScHHzaBXgRmInw433KSRiIlO0PkMpToJ6rPUxQDQbPGruT4dKfaVxSFaK6zHugm0FG16FJrFJz1obWpc4jfubH2RDZuQfGzF4hvy7bKB9lTxbu1uB7z9S0EbhATb2hA85kc/gehQujqx9x3J6mGXotOdGEnYBmQ6ONEHVeFTIJmhpFrNbTRSxz4ZLLq86b33C1TH+uZjjydwkS5ZtrF+jNrwubqcZZRZvz7iL/sfdPyVv3SImZHR7WnbtK0D2BBhZq73U5d7X0fxwDc/PlGzz8N4BDFxiEeBCRRCl72I+uLxqJMQYS/5fDf54sKJfBR7M2i/YXVnB4Ef0kYHVQ6arvpKKYeKjWkWIUjxpfX+RdpAzUbZNDwVpWizsa/pLrRksQxMv1BU/NFDfYB97OAWKEu2lWfts1gReKwna/VMIMGYVoIFrLpGBSCAX0t0vIMIC0pWSod0uDBvn1FGeqbD3iVvuw7zvp9ET/u0KIXSpZ73cG0/21WTVhKxGkDK4S7PZ2W3dEbFJjUDwaptk+oGtjKFD2fzoyUGwC0dVMVKlyFaRbh36thn4icaD8+fK7VBAWhFueNmXVtjrnYpgS3pOm7rkGUnaTZ/bDbWVQxBCTiMvnvbIj2ocSn8wg82yhvltET+iG1f0PxEe3cQZ7XUYRibG78RjZcKelpehIgw786x+TC7mDoPwJnlD7PVex793Pqn04oZdxCMS4v0rR5buYA17bSTp0/xOvMF9viZM5sIpF4="
 		}
-	}
-	return userIDs, nil
-}
+	}`
 
-// Write logs to an Excel (.xlsx) file
-func writeLogsToXLSX(filePath string, data [][]string) error {
-	f := excelize.NewFile()
-
-	// Write header row
-	headers := []string{"user_id", "created_at", "request_body", "response_body", "service"}
-	for i, header := range headers {
-		cell := fmt.Sprintf("%c1", 'A'+i) // A1, B1, C1, etc.
-		f.SetCellValue("Sheet1", cell, header)
-	}
-
-	// Write log entries
-	for i, row := range data {
-		for j, value := range row {
-			cell := fmt.Sprintf("%c%d", 'A'+j, i+2) // A2, B2, C2, etc.
-			f.SetCellValue("Sheet1", cell, value)
-		}
-	}
-
-	// Save the file
-	if err := f.SaveAs(filePath); err != nil {
-		return fmt.Errorf("error saving Excel file: %v", err)
-	}
-	return nil
-}
-
-// Fetch logs from the API for a given user ID
-func fetchLogsForUser(userID, authToken string) ([]LogEntry, error) {
-	url := fmt.Sprintf("https://gateway.finbox.in/lisa/getUserLogs?user_id=%s&collection_name=lender_request_response&service=abflplHunter", userID)
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	// Create a new HTTP POST request
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer([]byte(requestBody)))
 	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
+		log.Fatalf("Failed to create HTTP request: %v", err)
 	}
 
-	// Add authorization header
-	req.Header.Set("Authorization", authToken)
+	// Add headers to the request
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 
-	client := &http.Client{Timeout: 30 * time.Second} // Increased timeout to 30 seconds
+	// Send the request
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error making request: %v", err)
+		log.Fatalf("Failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	// Read and print the response
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading response body: %v", err)
+		log.Fatalf("Failed to read response body: %v", err)
 	}
 
-	// Print the raw API response for debugging purposes
-	fmt.Printf("API response for user %s: %s\n", userID, string(body))
-
-	var apiResponse APIResponse
-	if err := json.Unmarshal(body, &apiResponse); err != nil {
-		return nil, fmt.Errorf("error unmarshalling response: %v", err)
-	}
-
-	// Print number of logs fetched
-	fmt.Printf("Fetched %d logs for user %s\n", len(apiResponse.Data.Logs), userID)
-
-	return apiResponse.Data.Logs, nil
-}
-
-// Main function to read user IDs, fetch logs, and write to Excel
-func main() {
-	// Input and output Excel paths
-	inputXLSX := "/Users/poojithkumar/Downloads/4000.xlsx"
-	outputXLSX := "/Users/poojithkumar/Downloads/abfl_output.xlsx"
-	authToken := "Bearer ory_at_oCxRXn9jxFDnB1ZwpzvYQWeb-FQKp_pOqjtH6nLNbYg.U9WNtGpiOmENDuU9xO5bc8nO_EFxyX616xR11VHz5JM" // Provide authorization token here
-
-	// Read user IDs
-	userIDs, err := readUserIDsFromXLSX(inputXLSX)
-	if err != nil {
-		log.Fatalf("Error reading user IDs: %v", err)
-	}
-	fmt.Printf("Found %d user IDs to process\n", len(userIDs))
-
-	var allLogs [][]string
-
-	for _, userID := range userIDs {
-		// Add 200ms delay before each API call
-		time.Sleep(200 * time.Millisecond)
-
-		// Fetch logs for the current user
-		logs, err := fetchLogsForUser(userID, authToken)
-		if err != nil {
-			log.Printf("Error fetching logs for user %s: %v", userID, err)
-			continue
-		}
-
-		// Append the fetched logs
-		for _, logEntry := range logs {
-			allLogs = append(allLogs, []string{
-				userID,
-				logEntry.CreatedAt,
-				logEntry.RequestBody,
-				logEntry.ResponseBody,
-				logEntry.Service,
-			})
-		}
-	}
-
-	// Write logs to the output Excel file
-	if err := writeLogsToXLSX(outputXLSX, allLogs); err != nil {
-		log.Fatalf("Error writing logs to Excel: %v", err)
-	}
-
-	fmt.Printf("Successfully wrote logs to %s\n", outputXLSX)
+	fmt.Printf("Response Status: %s\n", resp.Status)
+	fmt.Printf("Response Body: %s\n", string(body))
 }
